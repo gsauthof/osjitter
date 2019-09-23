@@ -172,7 +172,7 @@ indirectly. An alternative to the TSC approach for detecting and
 measuring SMIs is to query CPU counters the SMI changes
 ([relevant stackoverflow answer][1]).
 
-[Cyclictest][cyctest] measures OS latency by [setting
+[Cyclictest][cyc] measures OS latency by [setting
 timers][cyc2] and comparing the actual sleep time with the
 configured one.
 
