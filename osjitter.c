@@ -23,7 +23,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <x86intrin.h> // __rdtsc(), __rdtscp(), _mm_lfence()
 #include <xmmintrin.h> // __mm_pause()
 
 
