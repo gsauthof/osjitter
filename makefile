@@ -15,6 +15,10 @@ CFLAGS = $(CFLAGSW_GCC) $(CFLAGS0) $(CFLAGS1)
 .PHONY: all
 all: osjitter
 
+osjitter: util.o
+
+pingpong: util.o
+
 .PHONY: clean
 clean:
-	rm -f osjitter osjitter.o
+	rm -f osjitter osjitter.o util.o pingpong pingpong.o
