@@ -61,11 +61,30 @@ struct Args {
 };
 typedef struct Args Args;
 
+static void help(FILE *f, const char *argv0)
+{
+    fprintf(f, "pingpong - measure inter thread notification overhead\n"
+            "\n"
+            "call: %s [OPT..]\n"
+            "\n"
+            "Options:\n"
+            "  --khz             TSC frequency (default: parse journalctl, read /proc)\n"
+            "  -n                ping-pong iterations (default: 10^6)\n"
+            "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
+            "                    (default: no pinning)\n"
+            "\n"
+            "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
+            , argv0);
+}
+
 static int parse_args(Args *args, int argc, char **argv)
 {
     *args = (const Args){0};
     for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--khz")) {
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            help(stdout, argv[0]);
+            exit(0);
+        } else if (!strcmp(argv[i], "--khz")) {
             ++i;
             if (i >= argc) {
                 fprintf(stderr, "--khz argument is missing\n");
@@ -91,6 +110,9 @@ static int parse_args(Args *args, int argc, char **argv)
                 return -1;
             }
             args->pin[j] = cpu + 1;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            exit(1);
         }
     }
     if (!args->n)
