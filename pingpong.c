@@ -57,7 +57,9 @@ struct Args {
     uint32_t mult;
     uint32_t shift;
     unsigned n;    // number of iterations
+    unsigned k; // number of pause iterations before each store
     unsigned pin[2];
+    bool json;
 };
 typedef struct Args Args;
 
@@ -70,8 +72,10 @@ static void help(FILE *f, const char *argv0)
             "Options:\n"
             "  --khz             TSC frequency (default: parse journalctl, read /proc)\n"
             "  -n                ping-pong iterations (default: 10^6)\n"
+            "  -k                #iterations pause before storing (default: 1000)\n"
             "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
             "                    (default: no pinning)\n"
+            "  --json            write raw values to JSON file (default: false)\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
             , argv0);
@@ -98,6 +102,13 @@ static int parse_args(Args *args, int argc, char **argv)
                 return -1;
             }
             args->n = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "-k")) {
+            ++i;
+            if (i >= argc) {
+                fprintf(stderr, "-k argument is missing\n");
+                return -1;
+            }
+            args->k = atoi(argv[i]);
         } else if (!strcmp(argv[i], "--pin")) {
             if (i+2 >= argc) {
                 fprintf(stderr, "--pin THREAD CPU arguments are missing\n");
@@ -110,6 +121,8 @@ static int parse_args(Args *args, int argc, char **argv)
                 return -1;
             }
             args->pin[j] = cpu + 1;
+        } else if (!strcmp(argv[i], "--json")) {
+            args->json = true;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -117,6 +130,8 @@ static int parse_args(Args *args, int argc, char **argv)
     }
     if (!args->n)
         args-> n = 1000 * 1000;
+    if (!args->k)
+        args-> k = 1000;
     return 0;
 }
 
@@ -124,6 +139,8 @@ struct Worker {
     pthread_t worker_id;
     unsigned init; // 0 -> start with send, 1 -> start with retrieve
     unsigned n;    // number of iterations
+    unsigned k;
+    uint32_t *raw_ds;  // delta values
     uint32_t *ds;  // delta values
     unsigned ds_size; // #delta values
 };
@@ -148,7 +165,8 @@ static void *spin_main(void *p)
 
     for (unsigned i = w.init; i < w.n; ++i) {
         if (i % 2 == 0) { // sender
-            for (unsigned i = 0; i < 1000; ++i)
+            unsigned k = i ? w.k : w.k * 2;
+            for (unsigned i = 0; i < k; ++i)
                 _mm_pause();
             tsc = double_fenced_rdtsc();
             atomic_store_explicit(&g_tsc, tsc, memory_order_release);
@@ -166,34 +184,88 @@ static void *spin_main(void *p)
             ds[j++] = delta;
         }
     }
+    assert(j <= w.n/2);
+    uint32_t *raw_ds = malloc(j * sizeof raw_ds[0]);
+    if (!raw_ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+    memcpy(raw_ds, ds, j * sizeof ds[0]);
     qsort(ds, j, sizeof ds[0], cmp_u32);
     x->ds = ds;
+    x->raw_ds = raw_ds;
     x->ds_size = j;
-    assert(j <= w.n/2);
     return x;
 }
 
+static int print_json(const Args *args, const Worker *ws, FILE *f)
+{
+    fprintf(f, "[\n");
+    for (unsigned i = 0; i < 2; ++i) {
+        const Worker *w = ws + i;
+        fprintf(f, "    [");
+        if (w->ds_size) {
+            fprintf(f, " %" PRIu64,
+                    mul_u64_u32_shr(w->raw_ds[0], args->mult, args->shift));
+        }
+        for (unsigned j = 1; j < w->ds_size; ++j) {
+            fprintf(f, ", %" PRIu64,
+                    mul_u64_u32_shr(w->raw_ds[j], args->mult, args->shift));
+        }
+        fprintf(f, "]");
+        if (!i)
+            fprintf(f, ",\n");
+    }
+    fprintf(f, "\n]\n");
+    return 0;
+}
 
 static int pp_results(const Args *args, const Worker *ws, FILE *f)
 {
-    fprintf(f, "Thread TSC_khz #delta min_ns max_ns median_ns\n");
+    fprintf(f, "Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns\n");
+    uint32_t *ys = 0;
     for (unsigned i = 0; i < 2; ++i) {
         const Worker *w = ws + i;
+        ys = realloc(ys, w->ds_size * sizeof ys[0]);
+        if (!ys) {
+            fprintf(stderr, "realloc in pp_results failed\n");
+            return -1;
+        }
+        uint32_t mad = mad_u32(w->ds, ys, w->ds_size);
         if (!w->ds_size)
             continue;
-        fprintf(f, "%u %"PRIu32  " %u "
-                "%" PRIu64 " "
-                "%" PRIu64 " "
-                "%" PRIu64 "\n",
+        fprintf(f, "%6u %8" PRIu32  " %7u "
+                "%7" PRIu64 " "
+                "%7" PRIu64 " "
+                "%10" PRIu64 " "
+                "%7" PRIu64 " "
+                "%7" PRIu64 " "
+                "%7" PRIu64 " "
+                "%7" PRIu64 " "
+                "%9" PRIu64 " "
+                "%7" PRIu64 " "
+                "\n",
                 i, args->tsc_khz, w->ds_size, 
                 mul_u64_u32_shr(w->ds[0],
                     args->mult, args->shift),
                 mul_u64_u32_shr(w->ds[w->ds_size - 1],
                     args->mult, args->shift),
                 mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 1, 2),
-                    args->mult, args->shift)
+                    args->mult, args->shift),
+                mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 1, 5),
+                    args->mult, args->shift),
+                mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 4, 5),
+                    args->mult, args->shift),
+                mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 90, 100),
+                    args->mult, args->shift),
+                mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 99, 100),
+                    args->mult, args->shift),
+                mul_u64_u32_shr(percentile_u32(w->ds, w->ds_size, 999, 1000),
+                    args->mult, args->shift),
+                mul_u64_u32_shr(mad, args->mult, args->shift)
                );
     }
+    free(ys);
     return 0;
 }
 
@@ -202,6 +274,7 @@ static int spin_pingpong(const Args *args)
     Worker ws[2] = {0};
     for (unsigned i = 0; i < 2; ++i) {
         ws[i].n = args->n;
+        ws[i].k = args->k;
         ws[i].init = i;
         pthread_attr_t attr;
         int r = pthread_attr_init(&attr);
@@ -248,9 +321,13 @@ static int spin_pingpong(const Args *args)
         fprintf(stderr, "One thread reported an error\n");
         return 1;
     }
-    pp_results(args, ws, stdout);
+    if (args->json)
+        print_json(args, ws, stdout);
+    else
+        pp_results(args, ws, stdout);
     for (unsigned i = 0; i < 2; ++i) {
         free(ws[i].ds);
+        free(ws[i].raw_ds);
     }
     return 0;
 }
