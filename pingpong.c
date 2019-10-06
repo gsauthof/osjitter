@@ -21,7 +21,8 @@
 
 static atomic_bool start_work;
 
-static _Atomic uint64_t g_tsc;
+static _Atomic uint64_t g_tsc   __attribute__ ((aligned (64)));
+static _Atomic uint64_t g_tsc_1 __attribute__ ((aligned (64)));
 
 extern __inline uint64_t __attribute__((__gnu_inline__, __always_inline__, __artificial__))
 double_fenced_rdtsc(void)
@@ -60,6 +61,7 @@ struct Args {
     unsigned k; // number of pause iterations before each store
     unsigned pin[2];
     bool json;
+    bool spin2;
 };
 typedef struct Args Args;
 
@@ -76,6 +78,7 @@ static void help(FILE *f, const char *argv0)
             "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
             "                    (default: no pinning)\n"
             "  --json            write raw values to JSON file (default: false)\n"
+            "  --spin2           use 2 separate variables for ping ping (default: false)\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
             , argv0);
@@ -123,6 +126,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->pin[j] = cpu + 1;
         } else if (!strcmp(argv[i], "--json")) {
             args->json = true;
+        } else if (!strcmp(argv[i], "--spin2")) {
+            args->spin2 = true;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -146,6 +151,23 @@ struct Worker {
 };
 typedef struct Worker Worker;
 
+
+static void *spin_main_finalize(Worker *x, uint32_t *ds, unsigned j)
+{
+    assert(j <= x->n/2);
+    uint32_t *raw_ds = malloc(j * sizeof raw_ds[0]);
+    if (!raw_ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+    memcpy(raw_ds, ds, j * sizeof ds[0]);
+    qsort(ds, j, sizeof ds[0], cmp_u32);
+    x->ds = ds;
+    x->raw_ds = raw_ds;
+    x->ds_size = j;
+    return x;
+}
+
 static void *spin_main(void *p)
 {
     Worker *x = (Worker*) p;
@@ -163,18 +185,25 @@ static void *spin_main(void *p)
         _mm_pause();
     }
 
-    for (unsigned i = w.init; i < w.n; ++i) {
-        if (i % 2 == 0) { // sender
-            unsigned k = i ? w.k : w.k * 2;
-            for (unsigned i = 0; i < k; ++i)
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
                 _mm_pause();
-            tsc = double_fenced_rdtsc();
-            atomic_store_explicit(&g_tsc, tsc, memory_order_release);
+            uint64_t t;
+            for (;;) {
+                t = double_fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                atomic_store_explicit(&g_tsc, t, memory_order_release);
+                break;
+            }
+            tsc = t;
         } else { // retriever
             uint64_t new_tsc;
             for (;;) {
                 new_tsc = atomic_load_explicit(&g_tsc, memory_order_consume);
-                if (new_tsc >= tsc) {
+                if (new_tsc > tsc) {
                     break;
                 }
                 // _mm_pause();
@@ -182,20 +211,106 @@ static void *spin_main(void *p)
             uint64_t now   = far_fenced_rdtsc();
             uint64_t delta = now - new_tsc;
             ds[j++] = delta;
+            tsc = new_tsc;
         }
     }
-    assert(j <= w.n/2);
-    uint32_t *raw_ds = malloc(j * sizeof raw_ds[0]);
-    if (!raw_ds) {
+    return spin_main_finalize(x, ds, j);
+}
+
+static void *spin_main0(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
         fprintf(stderr, "Failed to allocate delta array in thread\n");
         return 0;
     }
-    memcpy(raw_ds, ds, j * sizeof ds[0]);
-    qsort(ds, j, sizeof ds[0], cmp_u32);
-    x->ds = ds;
-    x->raw_ds = raw_ds;
-    x->ds_size = j;
-    return x;
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = double_fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                atomic_store_explicit(&g_tsc, t, memory_order_release);
+                break;
+            }
+        } else { // retriever
+            uint64_t new_tsc;
+            for (;;) {
+                new_tsc = atomic_load_explicit(&g_tsc_1, memory_order_consume);
+                if (new_tsc > tsc) {
+                    break;
+                }
+                // _mm_pause();
+            }
+            uint64_t now   = far_fenced_rdtsc();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
+static void *spin_main1(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = double_fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                atomic_store_explicit(&g_tsc_1, t, memory_order_release);
+                break;
+            }
+        } else { // retriever
+            uint64_t new_tsc;
+            for (;;) {
+                new_tsc = atomic_load_explicit(&g_tsc, memory_order_consume);
+                if (new_tsc > tsc) {
+                    break;
+                }
+                // _mm_pause();
+            }
+            uint64_t now   = far_fenced_rdtsc();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
 }
 
 static int print_json(const Args *args, const Worker *ws, FILE *f)
@@ -292,7 +407,14 @@ static int spin_pingpong(const Args *args)
                 return 1;
             }
         }
-        r = pthread_create(&ws[i].worker_id, &attr, spin_main, ws+i);
+        if (args->spin2) {
+            if (i == 0)
+                r = pthread_create(&ws[i].worker_id, &attr, spin_main0, ws+i);
+            else
+                r = pthread_create(&ws[i].worker_id, &attr, spin_main1, ws+i);
+        } else {
+            r = pthread_create(&ws[i].worker_id, &attr, spin_main, ws+i);
+        }
         if (r) {
             perror_e(r, "pthread_create failed");
             return 1;
