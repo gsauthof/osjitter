@@ -21,6 +21,8 @@
 
 static atomic_bool start_work;
 
+// make sure that both variables go into different cachelines
+// (intel/amd CPUs have 64 byte cache lines)
 static _Atomic uint64_t g_tsc   __attribute__ ((aligned (64)));
 static _Atomic uint64_t g_tsc_1 __attribute__ ((aligned (64)));
 
