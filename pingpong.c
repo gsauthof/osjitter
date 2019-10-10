@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -23,8 +24,32 @@ static atomic_bool start_work;
 
 // make sure that both variables go into different cachelines
 // (intel/amd CPUs have 64 byte cache lines)
-static _Atomic uint64_t g_tsc   __attribute__ ((aligned (64)));
-static _Atomic uint64_t g_tsc_1 __attribute__ ((aligned (64)));
+// without C11 support
+//static _Atomic uint64_t g_tsc   __attribute__ ((aligned (64)));
+//static _Atomic uint64_t g_tsc_1 __attribute__ ((aligned (64)));
+
+static alignas(64) _Atomic uint64_t g_tsc;
+static alignas(64) _Atomic uint64_t g_tsc_1;
+
+// without C11 support:
+// struct Item { ... } __attribute__ ((aligned (64)));
+
+struct Item {
+    // aligning the first field is equivalent to aligning the struct itself
+    alignas(64) pthread_mutex_t mutex;
+    pthread_cond_t cond_var;
+    uint64_t tsc;
+};
+typedef struct Item Item;
+
+static_assert(sizeof(Item) % 64 == 0, "Item is not aligned");
+
+static Item g_item[2] = {
+    { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER },
+    { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER }
+};
+
+static_assert(alignof(g_item) == 64, "Item array is not aligned");
 
 extern __inline uint64_t __attribute__((__gnu_inline__, __always_inline__, __artificial__))
 double_fenced_rdtsc(void)
@@ -55,6 +80,8 @@ far_fenced_rdtsc(void)
     return r;
 }
 
+enum Method { METHOD_SPIN, METHOD_SPIN2, METHOD_COND_VAR };
+typedef enum Method Method;
 struct Args {
     uint32_t tsc_khz;
     uint32_t mult;
@@ -63,7 +90,7 @@ struct Args {
     unsigned k; // number of pause iterations before each store
     unsigned pin[2];
     bool json;
-    bool spin2;
+    Method method;
 };
 typedef struct Args Args;
 
@@ -80,7 +107,8 @@ static void help(FILE *f, const char *argv0)
             "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
             "                    (default: no pinning)\n"
             "  --json            write raw values to JSON file (default: false)\n"
-            "  --spin2           use 2 separate variables for ping ping (default: false)\n"
+            "  --spin2           use 2 separate variables for ping pong\n"
+            "  --cv              use a condition variable for ping pong\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
             , argv0);
@@ -129,7 +157,9 @@ static int parse_args(Args *args, int argc, char **argv)
         } else if (!strcmp(argv[i], "--json")) {
             args->json = true;
         } else if (!strcmp(argv[i], "--spin2")) {
-            args->spin2 = true;
+            args->method = METHOD_SPIN2;
+        } else if (!strcmp(argv[i], "--cv")) {
+            args->method = METHOD_COND_VAR;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -315,6 +345,80 @@ static void *spin_main1(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
+static void *cv_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = double_fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                int r = pthread_mutex_lock(&g_item[!w.init].mutex);
+                if (r) {
+                    perror_e(r, "sender: mutex lock");
+                    return 0;
+                }
+                g_item[!w.init].tsc = t;
+                r = pthread_mutex_unlock(&g_item[!w.init].mutex);
+                if (r) {
+                    perror_e(r, "sender: mutex unlock");
+                    return 0;
+                }
+                r = pthread_cond_signal(&g_item[!w.init].cond_var);
+                if (r) {
+                    perror_e(r, "cond signal: mutex lock");
+                    return 0;
+                }
+                break;
+            }
+        } else { // retriever
+            int r = pthread_mutex_lock(&g_item[w.init].mutex);
+            if (r) {
+                perror_e(r, "retrieve: mutex lock");
+                return 0;
+            }
+            while (g_item[w.init].tsc <= tsc) {
+                r = pthread_cond_wait(&g_item[w.init].cond_var,
+                        &g_item[w.init].mutex);
+                if (r) {
+                    perror_e(r, "cond_wait");
+                    return 0;
+                }
+            }
+            uint64_t new_tsc = g_item[w.init].tsc;
+            r = pthread_mutex_unlock(&g_item[w.init].mutex);
+            if (r) {
+                perror_e(r, "retrieve: mutex unlock");
+                return 0;
+            }
+            uint64_t now   = far_fenced_rdtsc();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
 static int print_json(const Args *args, const Worker *ws, FILE *f)
 {
     fprintf(f, "[\n");
@@ -409,13 +513,19 @@ static int spin_pingpong(const Args *args)
                 return 1;
             }
         }
-        if (args->spin2) {
-            if (i == 0)
-                r = pthread_create(&ws[i].worker_id, &attr, spin_main0, ws+i);
-            else
-                r = pthread_create(&ws[i].worker_id, &attr, spin_main1, ws+i);
-        } else {
-            r = pthread_create(&ws[i].worker_id, &attr, spin_main, ws+i);
+        switch (args->method) {
+            case METHOD_SPIN:
+                r = pthread_create(&ws[i].worker_id, &attr, spin_main, ws+i);
+                break;
+            case METHOD_SPIN2:
+                if (i == 0)
+                    r = pthread_create(&ws[i].worker_id, &attr, spin_main0, ws+i);
+                else
+                    r = pthread_create(&ws[i].worker_id, &attr, spin_main1, ws+i);
+                break;
+            case METHOD_COND_VAR:
+                r = pthread_create(&ws[i].worker_id, &attr, cv_main, ws+i);
+                break;
         }
         if (r) {
             perror_e(r, "pthread_create failed");
