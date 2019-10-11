@@ -26,10 +26,15 @@ static atomic_bool start_work;
 // (intel/amd CPUs have 64 byte cache lines)
 // without C11 support
 //static _Atomic uint64_t g_tsc   __attribute__ ((aligned (64)));
-//static _Atomic uint64_t g_tsc_1 __attribute__ ((aligned (64)));
+//static alignas(64) _Atomic uint64_t g_tsc;
 
-static alignas(64) _Atomic uint64_t g_tsc;
-static alignas(64) _Atomic uint64_t g_tsc_1;
+
+struct Cell {
+    alignas(64) uint64_t tsc;
+};
+typedef struct Cell Cell;
+
+static Cell g_cell[2];
 
 // without C11 support:
 // struct Item { ... } __attribute__ ((aligned (64)));
@@ -80,7 +85,12 @@ far_fenced_rdtsc(void)
     return r;
 }
 
-enum Method { METHOD_SPIN, METHOD_SPIN2, METHOD_COND_VAR };
+enum Method {
+    METHOD_SPIN,
+    METHOD_SPIN_PAUSE,
+    METHOD_SPIN_PAUSE_MORE,
+    METHOD_COND_VAR
+};
 typedef enum Method Method;
 struct Args {
     uint32_t tsc_khz;
@@ -88,6 +98,7 @@ struct Args {
     uint32_t shift;
     unsigned n;    // number of iterations
     unsigned k; // number of pause iterations before each store
+    unsigned p; // number of pause iterations after each test
     unsigned pin[2];
     bool json;
     Method method;
@@ -107,7 +118,9 @@ static void help(FILE *f, const char *argv0)
             "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
             "                    (default: no pinning)\n"
             "  --json            write raw values to JSON file (default: false)\n"
-            "  --spin2           use 2 separate variables for ping pong\n"
+            "  --spin            loop on an atomic variable (default)\n"
+            "  --spin-pause      pause after each atomic load\n"
+            "  -p                #pauses after each atomic load\n"
             "  --cv              use a condition variable for ping pong\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
@@ -142,6 +155,13 @@ static int parse_args(Args *args, int argc, char **argv)
                 return -1;
             }
             args->k = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "-p")) {
+            ++i;
+            if (i >= argc) {
+                fprintf(stderr, "-p argument is missing\n");
+                return -1;
+            }
+            args->p = atoi(argv[i]);
         } else if (!strcmp(argv[i], "--pin")) {
             if (i+2 >= argc) {
                 fprintf(stderr, "--pin THREAD CPU arguments are missing\n");
@@ -156,8 +176,10 @@ static int parse_args(Args *args, int argc, char **argv)
             args->pin[j] = cpu + 1;
         } else if (!strcmp(argv[i], "--json")) {
             args->json = true;
-        } else if (!strcmp(argv[i], "--spin2")) {
-            args->method = METHOD_SPIN2;
+        } else if (!strcmp(argv[i], "--spin")) {
+            args->method = METHOD_SPIN;
+        } else if (!strcmp(argv[i], "--spin-pause")) {
+            args->method = METHOD_SPIN_PAUSE;
         } else if (!strcmp(argv[i], "--cv")) {
             args->method = METHOD_COND_VAR;
         } else {
@@ -169,6 +191,8 @@ static int parse_args(Args *args, int argc, char **argv)
         args-> n = 1000 * 1000;
     if (!args->k)
         args-> k = 1000;
+    if (args->p)
+        args->method = METHOD_SPIN_PAUSE_MORE;
     return 0;
 }
 
@@ -177,6 +201,7 @@ struct Worker {
     unsigned init; // 0 -> start with send, 1 -> start with retrieve
     unsigned n;    // number of iterations
     unsigned k;
+    unsigned p;
     uint32_t *raw_ds;  // delta values
     uint32_t *ds;  // delta values
     unsigned ds_size; // #delta values
@@ -227,18 +252,18 @@ static void *spin_main(void *p)
                 t = double_fenced_rdtsc();
                 if (t <= tsc)
                     continue;
-                atomic_store_explicit(&g_tsc, t, memory_order_release);
+                atomic_store_explicit(&g_cell[!w.init].tsc, t,
+                        memory_order_release);
                 break;
             }
-            tsc = t;
         } else { // retriever
             uint64_t new_tsc;
             for (;;) {
-                new_tsc = atomic_load_explicit(&g_tsc, memory_order_consume);
+                new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                        memory_order_consume);
                 if (new_tsc > tsc) {
                     break;
                 }
-                // _mm_pause();
             }
             uint64_t now   = far_fenced_rdtsc();
             uint64_t delta = now - new_tsc;
@@ -249,7 +274,7 @@ static void *spin_main(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
-static void *spin_main0(void *p)
+static void *spin_pause_main(void *p)
 {
     Worker *x = (Worker*) p;
     Worker w = *x;
@@ -276,17 +301,19 @@ static void *spin_main0(void *p)
                 t = double_fenced_rdtsc();
                 if (t <= tsc)
                     continue;
-                atomic_store_explicit(&g_tsc, t, memory_order_release);
+                atomic_store_explicit(&g_cell[!w.init].tsc, t,
+                        memory_order_release);
                 break;
             }
         } else { // retriever
             uint64_t new_tsc;
             for (;;) {
-                new_tsc = atomic_load_explicit(&g_tsc_1, memory_order_consume);
+                new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                        memory_order_consume);
                 if (new_tsc > tsc) {
                     break;
                 }
-                // _mm_pause();
+                _mm_pause();
             }
             uint64_t now   = far_fenced_rdtsc();
             uint64_t delta = now - new_tsc;
@@ -297,7 +324,7 @@ static void *spin_main0(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
-static void *spin_main1(void *p)
+static void *spin_pause_more_main(void *p)
 {
     Worker *x = (Worker*) p;
     Worker w = *x;
@@ -324,17 +351,20 @@ static void *spin_main1(void *p)
                 t = double_fenced_rdtsc();
                 if (t <= tsc)
                     continue;
-                atomic_store_explicit(&g_tsc_1, t, memory_order_release);
+                atomic_store_explicit(&g_cell[!w.init].tsc, t,
+                        memory_order_release);
                 break;
             }
         } else { // retriever
             uint64_t new_tsc;
             for (;;) {
-                new_tsc = atomic_load_explicit(&g_tsc, memory_order_consume);
+                new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                        memory_order_consume);
                 if (new_tsc > tsc) {
                     break;
                 }
-                // _mm_pause();
+                for (unsigned j = 0; j < w.p; ++j)
+                    _mm_pause();
             }
             uint64_t now   = far_fenced_rdtsc();
             uint64_t delta = now - new_tsc;
@@ -344,6 +374,7 @@ static void *spin_main1(void *p)
     }
     return spin_main_finalize(x, ds, j);
 }
+
 
 static void *cv_main(void *p)
 {
@@ -496,6 +527,7 @@ static int spin_pingpong(const Args *args)
     for (unsigned i = 0; i < 2; ++i) {
         ws[i].n = args->n;
         ws[i].k = args->k;
+        ws[i].p = args->p;
         ws[i].init = i;
         pthread_attr_t attr;
         int r = pthread_attr_init(&attr);
@@ -517,11 +549,13 @@ static int spin_pingpong(const Args *args)
             case METHOD_SPIN:
                 r = pthread_create(&ws[i].worker_id, &attr, spin_main, ws+i);
                 break;
-            case METHOD_SPIN2:
-                if (i == 0)
-                    r = pthread_create(&ws[i].worker_id, &attr, spin_main0, ws+i);
-                else
-                    r = pthread_create(&ws[i].worker_id, &attr, spin_main1, ws+i);
+            case METHOD_SPIN_PAUSE:
+                r = pthread_create(&ws[i].worker_id, &attr, spin_pause_main,
+                        ws+i);
+                break;
+            case METHOD_SPIN_PAUSE_MORE:
+                r = pthread_create(&ws[i].worker_id, &attr,
+                        spin_pause_more_main, ws+i);
                 break;
             case METHOD_COND_VAR:
                 r = pthread_create(&ws[i].worker_id, &attr, cv_main, ws+i);
