@@ -89,7 +89,8 @@ enum Method {
     METHOD_SPIN,
     METHOD_SPIN_PAUSE,
     METHOD_SPIN_PAUSE_MORE,
-    METHOD_COND_VAR
+    METHOD_COND_VAR,
+    METHOD_NULL
 };
 typedef enum Method Method;
 struct Args {
@@ -122,6 +123,7 @@ static void help(FILE *f, const char *argv0)
             "  --spin-pause      pause after each atomic load\n"
             "  -p                #pauses after each atomic load\n"
             "  --cv              use a condition variable for ping pong\n"
+            "  --null            signal nothing\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
             , argv0);
@@ -182,6 +184,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_SPIN_PAUSE;
         } else if (!strcmp(argv[i], "--cv")) {
             args->method = METHOD_COND_VAR;
+        } else if (!strcmp(argv[i], "--null")) {
+            args->method = METHOD_NULL;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -270,6 +274,34 @@ static void *spin_main(void *p)
             ds[j++] = delta;
             tsc = new_tsc;
         }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
+static void *spin_null_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n/2; ++i) {
+        unsigned k = i < 1 ? w.k : w.k * 2;
+        for (unsigned j = 0; j < k; ++j)
+            _mm_pause();
+        uint64_t new_tsc = double_fenced_rdtsc();
+        uint64_t now     = far_fenced_rdtsc();
+        uint64_t delta   = now - new_tsc;
+        ds[j++] = delta;
     }
     return spin_main_finalize(x, ds, j);
 }
@@ -559,6 +591,10 @@ static int spin_pingpong(const Args *args)
                 break;
             case METHOD_COND_VAR:
                 r = pthread_create(&ws[i].worker_id, &attr, cv_main, ws+i);
+                break;
+            case METHOD_NULL:
+                r = pthread_create(&ws[i].worker_id, &attr, spin_null_main,
+                        ws+i);
                 break;
         }
         if (r) {
