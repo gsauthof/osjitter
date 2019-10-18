@@ -116,7 +116,7 @@ static void help(FILE *f, const char *argv0)
             "  --khz             TSC frequency (default: parse journalctl, read /proc)\n"
             "  -n                ping-pong iterations (default: 10^6)\n"
             "  -k                #iterations pause before storing (default: 1000)\n"
-            "  -pin THREAD CPU   0 <= THREAD <= 1, pin each thread to a CPU/core\n"
+            "  --pin THREAD CPU  0 <= THREAD <= 1, pin each thread to a CPU/core\n"
             "                    (default: no pinning)\n"
             "  --json            write raw values to JSON file (default: false)\n"
             "  --spin            loop on an atomic variable (default)\n"
@@ -195,7 +195,7 @@ static int parse_args(Args *args, int argc, char **argv)
         args-> n = 1000 * 1000;
     if (!args->k)
         args-> k = 1000;
-    if (args->p)
+    if (args->method == METHOD_SPIN_PAUSE && args->p)
         args->method = METHOD_SPIN_PAUSE_MORE;
     return 0;
 }
