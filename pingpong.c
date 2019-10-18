@@ -70,7 +70,7 @@ double_fenced_rdtsc(void)
     _mm_mfence();
     _mm_lfence();
     uint64_t r = __rdtsc();
-    _mm_lfence();
+    // _mm_lfence();
     return r;
 }
 extern __inline uint64_t __attribute__((__gnu_inline__, __always_inline__, __artificial__))
@@ -278,6 +278,7 @@ static void *spin_main(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
+
 static void *spin_null_main(void *p)
 {
     Worker *x = (Worker*) p;
@@ -295,9 +296,6 @@ static void *spin_null_main(void *p)
     }
 
     for (unsigned i = 0; i < w.n/2; ++i) {
-        unsigned k = i < 1 ? w.k : w.k * 2;
-        for (unsigned j = 0; j < k; ++j)
-            _mm_pause();
         uint64_t new_tsc = double_fenced_rdtsc();
         uint64_t now     = far_fenced_rdtsc();
         uint64_t delta   = now - new_tsc;
