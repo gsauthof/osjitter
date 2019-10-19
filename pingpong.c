@@ -19,6 +19,7 @@
 #include <x86intrin.h> // __rdtsc(), _mm_lfence(), ...
 
 #include "util.h"
+#include "tsc.h"
 
 static atomic_bool start_work;
 
@@ -56,34 +57,6 @@ static Item g_item[2] = {
 
 static_assert(alignof(g_item) == 64, "Item array is not aligned");
 
-extern __inline uint64_t __attribute__((__gnu_inline__, __always_inline__, __artificial__))
-double_fenced_rdtsc(void)
-{
-    // https://www.felixcloutier.com/x86/rdtsc
-    // If software requires RDTSC to be executed only after all previous
-    // instructions have executed and all previous loads and stores are
-    // globally visible, it can execute the sequence MFENCE;LFENCE immediately
-    // before RDTSC.
-    // If software requires RDTSC to be executed prior to execution of any
-    // subsequent instruction (including any memory accesses), it can execute
-    // the sequence LFENCE immediately after RDTSC.
-    _mm_mfence();
-    _mm_lfence();
-    uint64_t r = __rdtsc();
-    // _mm_lfence();
-    return r;
-}
-extern __inline uint64_t __attribute__((__gnu_inline__, __always_inline__, __artificial__))
-far_fenced_rdtsc(void)
-{
-    // https://www.felixcloutier.com/x86/rdtsc
-    // If software requires RDTSC to be executed prior to execution of any
-    // subsequent instruction (including any memory accesses), it can execute
-    // the sequence LFENCE immediately after RDTSC.
-    uint64_t r = __rdtsc();
-    _mm_lfence();
-    return r;
-}
 
 enum Method {
     METHOD_SPIN,
@@ -253,7 +226,7 @@ static void *spin_main(void *p)
                 _mm_pause();
             uint64_t t;
             for (;;) {
-                t = double_fenced_rdtsc();
+                t = fenced_rdtsc();
                 if (t <= tsc)
                     continue;
                 atomic_store_explicit(&g_cell[!w.init].tsc, t,
@@ -269,7 +242,7 @@ static void *spin_main(void *p)
                     break;
                 }
             }
-            uint64_t now   = far_fenced_rdtsc();
+            uint64_t now   = fenced_rdtscp();
             uint64_t delta = now - new_tsc;
             ds[j++] = delta;
             tsc = new_tsc;
@@ -296,8 +269,8 @@ static void *spin_null_main(void *p)
     }
 
     for (unsigned i = 0; i < w.n/2; ++i) {
-        uint64_t new_tsc = double_fenced_rdtsc();
-        uint64_t now     = far_fenced_rdtsc();
+        uint64_t new_tsc = fenced_rdtsc();
+        uint64_t now     = fenced_rdtscp();
         uint64_t delta   = now - new_tsc;
         ds[j++] = delta;
     }
@@ -328,7 +301,7 @@ static void *spin_pause_main(void *p)
                 _mm_pause();
             uint64_t t;
             for (;;) {
-                t = double_fenced_rdtsc();
+                t = fenced_rdtsc();
                 if (t <= tsc)
                     continue;
                 atomic_store_explicit(&g_cell[!w.init].tsc, t,
@@ -345,7 +318,7 @@ static void *spin_pause_main(void *p)
                 }
                 _mm_pause();
             }
-            uint64_t now   = far_fenced_rdtsc();
+            uint64_t now   = fenced_rdtscp();
             uint64_t delta = now - new_tsc;
             ds[j++] = delta;
             tsc = new_tsc;
@@ -378,7 +351,7 @@ static void *spin_pause_more_main(void *p)
                 _mm_pause();
             uint64_t t;
             for (;;) {
-                t = double_fenced_rdtsc();
+                t = fenced_rdtsc();
                 if (t <= tsc)
                     continue;
                 atomic_store_explicit(&g_cell[!w.init].tsc, t,
@@ -396,7 +369,7 @@ static void *spin_pause_more_main(void *p)
                 for (unsigned j = 0; j < w.p; ++j)
                     _mm_pause();
             }
-            uint64_t now   = far_fenced_rdtsc();
+            uint64_t now   = fenced_rdtscp();
             uint64_t delta = now - new_tsc;
             ds[j++] = delta;
             tsc = new_tsc;
@@ -430,7 +403,7 @@ static void *cv_main(void *p)
                 _mm_pause();
             uint64_t t;
             for (;;) {
-                t = double_fenced_rdtsc();
+                t = fenced_rdtsc();
                 if (t <= tsc)
                     continue;
                 int r = pthread_mutex_lock(&g_item[!w.init].mutex);
@@ -471,7 +444,7 @@ static void *cv_main(void *p)
                 perror_e(r, "retrieve: mutex unlock");
                 return 0;
             }
-            uint64_t now   = far_fenced_rdtsc();
+            uint64_t now   = fenced_rdtscp();
             uint64_t delta = now - new_tsc;
             ds[j++] = delta;
             tsc = new_tsc;
