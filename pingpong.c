@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <x86intrin.h> // __rdtsc(), _mm_lfence(), ...
 
 #include "util.h"
@@ -57,13 +58,15 @@ static Item g_item[2] = {
 
 static_assert(alignof(g_item) == 64, "Item array is not aligned");
 
+static int g_pipes[2][2];
 
 enum Method {
     METHOD_SPIN,
     METHOD_SPIN_PAUSE,
     METHOD_SPIN_PAUSE_MORE,
     METHOD_COND_VAR,
-    METHOD_NULL
+    METHOD_NULL,
+    METHOD_PIPE
 };
 typedef enum Method Method;
 struct Args {
@@ -96,6 +99,7 @@ static void help(FILE *f, const char *argv0)
             "  --spin-pause      pause after each atomic load\n"
             "  -p                #pauses after each atomic load\n"
             "  --cv              use a condition variable for ping pong\n"
+            "  --pipe            use a UNIX pipe for ping pong\n"
             "  --null            signal nothing\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
@@ -159,6 +163,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_COND_VAR;
         } else if (!strcmp(argv[i], "--null")) {
             args->method = METHOD_NULL;
+        } else if (!strcmp(argv[i], "--pipe")) {
+            args->method = METHOD_PIPE;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -453,6 +459,64 @@ static void *cv_main(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
+static void *pipe_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                ssize_t l = write(g_pipes[!w.init][1], &t, sizeof t);
+                if (l == -1) {
+                    perror("pipe write");
+                    return 0;
+                }
+                if (l != sizeof t) {
+                    fprintf(stderr, "written into pipe less than expected\n");
+                    return 0;
+                }
+                break;
+            }
+        } else { // retriever
+            uint64_t new_tsc;
+            ssize_t l = read(g_pipes[w.init][0], &new_tsc, sizeof new_tsc);
+            if (l == -1) {
+                perror("pipe read");
+                return 0;
+            }
+            if (l != sizeof new_tsc) {
+                fprintf(stderr, "read from pipe less than expected\n");
+                return 0;
+            }
+            uint64_t now   = fenced_rdtscp();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
 static int print_json(const Args *args, const Worker *ws, FILE *f)
 {
     fprintf(f, "[\n");
@@ -562,6 +626,14 @@ static int spin_pingpong(const Args *args)
                 break;
             case METHOD_COND_VAR:
                 r = pthread_create(&ws[i].worker_id, &attr, cv_main, ws+i);
+                break;
+            case METHOD_PIPE:
+                r = pipe(g_pipes[i]);
+                if (r == -1) {
+                    perror("pipe");
+                    return 1;
+                }
+                r = pthread_create(&ws[i].worker_id, &attr, pipe_main, ws+i);
                 break;
             case METHOD_NULL:
                 r = pthread_create(&ws[i].worker_id, &attr, spin_null_main,
