@@ -234,7 +234,7 @@ static int parse_args(Args *args, int argc, char **argv)
 
 struct Worker {
     pthread_t worker_id;
-    unsigned init; // 0 -> start with send, 1 -> start with retrieve
+    unsigned init; // 0 -> start with send, 1 -> start with receive
     unsigned n;    // number of iterations
     unsigned k;
     unsigned p;
@@ -292,7 +292,7 @@ static void *spin_main(void *p)
                         memory_order_release);
                 break;
             }
-        } else { // retriever
+        } else { // receiver
             uint64_t new_tsc;
             for (;;) {
                 new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
@@ -367,7 +367,7 @@ static void *spin_pause_main(void *p)
                         memory_order_release);
                 break;
             }
-        } else { // retriever
+        } else { // receiver
             uint64_t new_tsc;
             for (;;) {
                 new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
@@ -417,7 +417,7 @@ static void *spin_pause_more_main(void *p)
                         memory_order_release);
                 break;
             }
-        } else { // retriever
+        } else { // receiver
             uint64_t new_tsc;
             for (;;) {
                 new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
@@ -483,7 +483,7 @@ static void *cv_main(void *p)
                 }
                 break;
             }
-        } else { // retriever
+        } else { // receiver
             int r = pthread_mutex_lock(&g_item[w.init].mutex);
             if (r) {
                 perror_e(r, "retrieve: mutex lock");
@@ -550,7 +550,7 @@ static void *pipe_main(void *p)
                 }
                 break;
             }
-        } else { // retriever
+        } else { // receiver
             uint64_t new_tsc;
             ssize_t l = read(g_pipes[w.init][0], &new_tsc, sizeof new_tsc);
             if (l == -1) {
