@@ -21,6 +21,7 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 #include <errno.h>
+#include <semaphore.h>
 
 #include "util.h"
 #include "tsc.h"
@@ -107,7 +108,12 @@ static int futex_unlock(_Atomic int *f)
     return 0;
 }
 
-
+struct Stripe {
+    alignas(64) sem_t sem;
+    uint64_t tsc;
+};
+typedef struct Stripe Stripe;
+static Stripe g_stripe[2];
 
 enum Method {
     METHOD_SPIN,
@@ -116,7 +122,8 @@ enum Method {
     METHOD_COND_VAR,
     METHOD_NULL,
     METHOD_PIPE,
-    METHOD_FUTEX
+    METHOD_FUTEX,
+    METHOD_SEMAPHORE
 };
 typedef enum Method Method;
 struct Args {
@@ -151,6 +158,7 @@ static void help(FILE *f, const char *argv0)
             "  --cv              use a condition variable for ping pong\n"
             "  --pipe            use a UNIX pipe for ping pong\n"
             "  --futex           use a Linux futex for ping pong\n"
+            "  --sem             use a POSIX semaphore for ping ping\n"
             "  --null            signal nothing\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
@@ -218,6 +226,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_PIPE;
         } else if (!strcmp(argv[i], "--futex")) {
             args->method = METHOD_FUTEX;
+        } else if (!strcmp(argv[i], "--sem")) {
+            args->method = METHOD_SEMAPHORE;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -570,6 +580,74 @@ static void *pipe_main(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
+static void *semaphore_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            int r = sem_wait(&g_stripe[w.init].sem);
+            if (r == -1) {
+                perror("sem wait");
+                return 0;
+            }
+
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                g_stripe[!w.init].tsc = t;
+
+                int r = sem_post(&g_stripe[!w.init].sem);
+                if (r == -1) {
+                    perror("sem post");
+                    return 0;
+                }
+
+                break;
+            }
+        } else { // receiver
+            uint64_t new_tsc;
+
+            int r = sem_wait(&g_stripe[w.init].sem);
+            if (r == -1) {
+                perror("sem wait");
+                return 0;
+            }
+            new_tsc = g_stripe[w.init].tsc;
+
+            uint64_t now   = fenced_rdtscp();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+
+            r = sem_post(&g_stripe[w.init].sem);
+            if (r == -1) {
+                perror("sem post");
+                return 0;
+            }
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
 // note that this lock/unlock scheme doesn't work with posix mutexes
 // because unlocking a locked posix mutex from a different thread
 // is undefined behaviour
@@ -694,7 +772,7 @@ static int pp_results(const Args *args, const Worker *ws, FILE *f)
                 "%9" PRIu64 " "
                 "%7" PRIu64 " "
                 "\n",
-                i, args->tsc_khz, w->ds_size, 
+                i, args->tsc_khz, w->ds_size,
                 mul_u64_u32_shr(w->ds[0],
                     args->mult, args->shift),
                 mul_u64_u32_shr(w->ds[w->ds_size - 1],
@@ -768,6 +846,14 @@ static int spin_pingpong(const Args *args)
             case METHOD_FUTEX:
                 g_follicle[i].futex = i;
                 r = pthread_create(&ws[i].worker_id, &attr, futex_main, ws+i);
+                break;
+            case METHOD_SEMAPHORE:
+                r = sem_init(&g_stripe[i].sem, 0, !i);
+                if (r == -1) {
+                    perror("sem_init");
+                    return 1;
+                }
+                r = pthread_create(&ws[i].worker_id, &attr, semaphore_main, ws+i);
                 break;
             case METHOD_NULL:
                 r = pthread_create(&ws[i].worker_id, &attr, spin_null_main,
