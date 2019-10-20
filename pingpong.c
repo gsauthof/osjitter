@@ -18,6 +18,9 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <x86intrin.h> // __rdtsc(), _mm_lfence(), ...
+#include <sys/syscall.h>
+#include <linux/futex.h>
+#include <errno.h>
 
 #include "util.h"
 #include "tsc.h"
@@ -32,7 +35,7 @@ static atomic_bool start_work;
 
 
 struct Cell {
-    alignas(64) uint64_t tsc;
+    alignas(64) _Atomic uint64_t tsc;
 };
 typedef struct Cell Cell;
 
@@ -60,13 +63,60 @@ static_assert(alignof(g_item) == 64, "Item array is not aligned");
 
 static int g_pipes[2][2];
 
+
+struct Follicle {
+    alignas(64) _Atomic int futex;
+    uint64_t tsc;
+};
+typedef struct Follicle Follicle;
+static Follicle g_follicle[2];
+
+static int
+atomic_futex(_Atomic int *uaddr, int futex_op, int val,
+      const struct timespec *timeout, int *uaddr2, int val3)
+{
+    (void)uaddr2;
+    return syscall(SYS_futex, uaddr, futex_op, val, timeout, uaddr, val3);
+}
+
+static int futex_lock(_Atomic int *f)
+{
+    for (;;) {
+        int zero = 0;
+        if (atomic_compare_exchange_weak(f, &zero, 1))
+            return 0;
+        int r = atomic_futex(f, FUTEX_WAIT_PRIVATE, 1, NULL, NULL, 0);
+        if (r == -1) {
+            if (errno != EAGAIN)
+                return r;
+        }
+    }
+    return 0;
+}
+
+// returns 1 if one thread was woken up
+static int futex_unlock(_Atomic int *f)
+{
+    int one = 1;
+    if (atomic_compare_exchange_strong(f, &one, 0)) {
+        int r = atomic_futex(f, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+        return r;
+    } else {
+        return -2;
+    }
+    return 0;
+}
+
+
+
 enum Method {
     METHOD_SPIN,
     METHOD_SPIN_PAUSE,
     METHOD_SPIN_PAUSE_MORE,
     METHOD_COND_VAR,
     METHOD_NULL,
-    METHOD_PIPE
+    METHOD_PIPE,
+    METHOD_FUTEX
 };
 typedef enum Method Method;
 struct Args {
@@ -100,6 +150,7 @@ static void help(FILE *f, const char *argv0)
             "  -p                #pauses after each atomic load\n"
             "  --cv              use a condition variable for ping pong\n"
             "  --pipe            use a UNIX pipe for ping pong\n"
+            "  --futex           use a Linux futex for ping pong\n"
             "  --null            signal nothing\n"
             "\n"
             "2019, Georg Sauthoff <mail@gms.tf>, GPLv3+\n"
@@ -165,6 +216,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_NULL;
         } else if (!strcmp(argv[i], "--pipe")) {
             args->method = METHOD_PIPE;
+        } else if (!strcmp(argv[i], "--futex")) {
+            args->method = METHOD_FUTEX;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             exit(1);
@@ -517,6 +570,83 @@ static void *pipe_main(void *p)
     return spin_main_finalize(x, ds, j);
 }
 
+// note that this lock/unlock scheme doesn't work with posix mutexes
+// because unlocking a locked posix mutex from a different thread
+// is undefined behaviour
+static void *futex_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            int r = futex_lock(&g_follicle[w.init].futex);
+            if (r == -1 ) {
+                perror("futex wait");
+                return 0;
+            }
+
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                g_follicle[!w.init].tsc = t;
+                int r = futex_unlock(&g_follicle[!w.init].futex);
+                if (r == -1) {
+                    perror("futex wake");
+                    return 0;
+                }
+                if (r == -2) {
+                    fprintf(stderr, "%u: unexpectedly unlocked\n", w.init);
+                    abort();
+                }
+                break;
+            }
+        } else { // receiver
+            uint64_t new_tsc;
+
+            int r = futex_lock(&g_follicle[w.init].futex);
+            if (r == -1 ) {
+                perror("futex wait");
+                return 0;
+            }
+            new_tsc = g_follicle[w.init].tsc;
+
+            uint64_t now   = fenced_rdtscp();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+
+            r = futex_unlock(&g_follicle[w.init].futex);
+            if (r == -1 ) {
+                perror("futex wake");
+                return 0;
+            }
+            if (r == -2) {
+                fprintf(stderr, "%u: unexpectedly unlocked\n", w.init);
+                abort();
+            }
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
 static int print_json(const Args *args, const Worker *ws, FILE *f)
 {
     fprintf(f, "[\n");
@@ -634,6 +764,10 @@ static int spin_pingpong(const Args *args)
                     return 1;
                 }
                 r = pthread_create(&ws[i].worker_id, &attr, pipe_main, ws+i);
+                break;
+            case METHOD_FUTEX:
+                g_follicle[i].futex = i;
+                r = pthread_create(&ws[i].worker_id, &attr, futex_main, ws+i);
                 break;
             case METHOD_NULL:
                 r = pthread_create(&ws[i].worker_id, &attr, spin_null_main,
