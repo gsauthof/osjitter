@@ -1,0 +1,28 @@
+$ ./pingpong --pin 0 6 --pin 1 5 --sem
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000    4130   10298       4471    4370    4708    4801    5152      8041     123 
+     1  2200000  500000    4058   10873       4484    4377    4738    4829    5201      8121     126 
+$ ./pingpong --pin 0 6 --pin 1 5 --futex
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000    4003    8964       4270    4200    4527    4608    4966      7720      73 
+     1  2200000  500000    2631    9746       4263    4186    4533    4692    5024      7660      91 
+$ ./pingpong --pin 0 6 --pin 1 5 --pipe
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000    5290   12497       5862    5660    6405    6560    7006      9944     210 
+     1  2200000  500000    5246   12132       5730    5533    6209    6531    6985      9837     211 
+$ ./pingpong --pin 0 6 --pin 1 5 --cv
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000    4498    9666       4845    4776    5055    5181    5549      8419      79 
+     1  2200000  500000    4390   13333       4765    4669    5026    5174    5521      8239     107 
+$ ./pingpong --pin 0 6 --pin 1 5 --spin
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000     173    3540        179     178     179     180     186       259       0 
+     1  2200000  500000     170    3455        175     174     176     176     181       186       0 
+$ ./pingpong --pin 0 6 --pin 1 5 --spin-pause
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000     168    3667        176     170     177     180     202       276       3 
+     1  2200000  500000     166    3376        170     166     173     177     201       209       3
+$ ./pingpong --pin 0 6 --pin 1 5 --spin-pause -p 2
+Thread  TSC_khz  #delta  min_ns  max_ns  median_ns  p20_ns  p80_ns  p90_ns  p99_ns  p99.9_ns  mad_ns
+     0  2200000  500000     169    3965        191     178     241     255     271       455      12 
+     1  2200000  500000     166    3719        198     181     245     261     271       444      16
