@@ -13,7 +13,7 @@ CFLAGS1 = -O3
 CFLAGS = $(CFLAGSW_GCC) $(CFLAGS0) $(CFLAGS1)
 
 .PHONY: all
-all: osjitter
+all: osjitter pingpong
 
 osjitter: util.o
 

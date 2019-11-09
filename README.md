@@ -1,4 +1,6 @@
-This repository contains OSjitter - a tool for measuring how much
+This repository contains OSjitter and Pingpong.
+
+OSjitter is a tool for measuring how much
 the operating system interrupts programs. Such interruptions
 increase the latency of a program while the variation in latency
 is called jitter.
@@ -9,6 +11,11 @@ depends on the kind of load a real-time program is applying to a
 system. Thus, one still needs to execute a domain specific
 test-suite to the real-time program of interest after a tool like
 OSjitter shows good results.
+
+The Pingong utility measures the overhead of several thread
+notification mechanisms such as spinning on a atomic variable
+(with/without pauses), POSIX condition variables, semaphores,
+pipes and raw Linux futexes.
 
 
 2019, Georg Sauthoff <mail@gms.tf>, GPLv3+
@@ -82,9 +89,10 @@ OSjitter:
        6  2200000      8       8        0          1        39910   0.000    60       22       3218    1616    8130   11231   11231     11231    11793    1601
        7  2200000      5       5        0          0        16998   0.000    60       22       2091    2079    8506    8506    8506      8506     8506     574
 
-=> Isolated CPUs: Improvements in interruptions, few improvements in median, max and MAD.
+=> Isolated CPUs: Improvements in interruptions, few improvements
+in median, max and median absolute deviation (MAD).
 
-Switch from througput-performance based tuned profile to a latency-performance
+Switch from throughput-performance based tuned profile to a latency-performance
 based one (i.e. disable CPU frequency scaling, longer stat interval, writeback
 cpubask etc.):
 
@@ -174,6 +182,32 @@ measuring SMIs is to query CPU counters the SMI changes
 [Cyclictest][cyc] measures OS latency by [setting
 timers][cyc2] and comparing the actual sleep time with the
 configured one.
+
+## Pingpong Results
+
+The doc directory contains some example Pingpong results for
+different configurations.
+
+The results for condition variable, semaphore and futex are quite
+similar because, on Linux, condition variables and semaphores are
+implemented in terms of futex.
+
+Notifying via a traditional UNIX pipe is more expensive than
+using a futex but it's the same order of magnitude.
+
+Inserting a PAUSE instruction while spinning on an atomic
+variable increases the median absolute deviation (MAD) just a
+little bit, but yields similar median while reducing the number
+of executed instructions.
+
+As documented in the kernel documentation, comparing the results
+with and without `full_hz=` show how this features increases
+context-switch overhead and thus increases latency for the
+syscall methods (e.g. by 0.6 us or so in the median, a few us in
+the other percentiles and maximum). On the other hand, more
+context-switch overhead isn't relevant for spinning on an atomic
+variable, thus, `full_hz=` really pays off for this use-case
+because the process is interrupted much less.
 
 
 [sj]: https://www.openonload.org/download.html
