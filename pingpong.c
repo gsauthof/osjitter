@@ -146,7 +146,7 @@ static void help(FILE *f, const char *argv0)
             "call: %s [OPT..]\n"
             "\n"
             "Options:\n"
-            "  --khz             TSC frequency (default: parse journalctl, read /proc)\n"
+            "  --khz KHZ         TSC frequency (default: parse journalctl, read /proc)\n"
             "  -n                ping-pong iterations (default: 10^6)\n"
             "  -k                #iterations pause before storing (default: 1000)\n"
             "  --pin THREAD CPU  0 <= THREAD <= 1, pin each thread to a CPU/core\n"
