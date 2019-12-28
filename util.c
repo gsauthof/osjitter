@@ -164,11 +164,9 @@ static int get_tsc_khz_proc(uint32_t *tsc_khz)
     return 0;
 }
 
-static int get_tsc_khz_journal(uint32_t *tsc_khz)
+static int get_tsc_khz_cmd(const char *cmd, uint32_t *tsc_khz)
 {
-    FILE *f = popen("journalctl --boot | grep 'kernel: tsc:' -i "
-            "| cut -d' ' -f5- | grep -o ' [0-9]\\+\\.[0-9]\\{3\\} MHz' "
-            "| tail -n 1 ", "re");
+    FILE *f = popen(cmd, "re");
     if (!f) {
         perror("reading TSC khz from journalctl failed");
         return 1;
@@ -187,6 +185,8 @@ static int get_tsc_khz_journal(uint32_t *tsc_khz)
         fprintf(stderr, "buffer for TSC khz from journal too small\n");
         return -1;
     }
+    if (l < 11)
+        return 0;
     char buf[16];
     char *t = mempcpy(buf, line+1, l-1-8-1);
     t = mempcpy(t, line+(l-7-1), 3);
@@ -200,6 +200,27 @@ static int get_tsc_khz_journal(uint32_t *tsc_khz)
     return 0;
 }
 
+static int get_tsc_khz_journal(uint32_t *tsc_khz)
+{
+
+    const char cmd[] = "journalctl --boot 2>/dev/null | grep 'kernel: tsc:' -i "
+            "| cut -d' ' -f5- | grep -o ' [0-9]\\+\\.[0-9]\\{3\\} MHz' "
+            "| tail -n 1 ";
+    return get_tsc_khz_cmd(cmd, tsc_khz);
+}
+
+// fall-back to dmesg on systems without journald or ones
+// where the user doesn't have enough permissions for journalctl --boot.
+// pitfall: the message might be already rotated out of the dmesg buffer,
+// on a long running system
+static int get_tsc_khz_dmesg(uint32_t *tsc_khz)
+{
+    const char cmd[] = "dmesg  | grep '\\] tsc:' -i"
+            "| cut -d' ' -f5- | grep -o ' [0-9]\\+\\.[0-9]\\{3\\} MHz' "
+            "| tail -n 1 ";
+    return get_tsc_khz_cmd(cmd, tsc_khz);
+}
+
 // see also https://stackoverflow.com/a/57835630/427158 for
 // some ways to get the tick rate of the TSC
 int get_tsc_khz(uint32_t *tsc_khz)
@@ -209,6 +230,11 @@ int get_tsc_khz(uint32_t *tsc_khz)
         return r;
     if (!*tsc_khz) {
         int r = get_tsc_khz_journal(tsc_khz);
+        if (r < 0)
+            return r;
+    }
+    if (!*tsc_khz) {
+        int r = get_tsc_khz_dmesg(tsc_khz);
         if (r < 0)
             return r;
     }
