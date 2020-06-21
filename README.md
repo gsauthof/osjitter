@@ -1,4 +1,4 @@
-This repository contains OSjitter and Pingpong.
+This repository contains OSjitter, Pingpong and ptp-clock-offset.
 
 OSjitter is a tool for measuring how much
 the operating system interrupts programs. Such interruptions
@@ -16,6 +16,11 @@ The Pingong utility measures the overhead of several thread
 notification mechanisms such as spinning on a atomic variable
 (with/without pauses), POSIX condition variables, semaphores,
 pipes and raw Linux futexes.
+
+The ptp-clock-offset utility is a small program for checking
+the availability of different PTP offset ioctls and how they
+perform. Rule of thumb: using any PTP offset ioctl is better than
+having to use `clock_gettime()` and smaller delays are better.
 
 
 2019, Georg Sauthoff <mail@gms.tf>, GPLv3+

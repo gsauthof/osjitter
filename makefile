@@ -19,6 +19,8 @@ osjitter: util.o
 
 pingpong: util.o
 
+ptp-clock-offset: util.o
+
 .PHONY: clean
 clean:
-	rm -f osjitter osjitter.o util.o pingpong pingpong.o
+	rm -f osjitter osjitter.o util.o pingpong pingpong.o ptp-clock-offset
