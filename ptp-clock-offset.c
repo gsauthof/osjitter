@@ -18,6 +18,7 @@
 #include <time.h>
 
 #include <linux/ptp_clock.h>
+#include "ptp-clock-future.h"
 
 #include "tsc.h"
 #include "util.h"
