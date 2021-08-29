@@ -34,14 +34,14 @@ def bench(exe, bcmd):
         with open('/proc/cmdline') as f:
             cmdline = f.read().strip()
         try:
-            tuned = subprocess.check_output(['tuned-adm', 'active'], universal_newliens=True)
+            tuned = subprocess.check_output(['/usr/sbin/tuned-adm', 'active'], universal_newlines=True)
             tuned = tuned.split()[-1]
         except:
             tuned = ''
         with open('/proc/cpuinfo') as f:
             cpuinfo = f.read().splitlines()
             cpuinfo = [ l.split(': ')[-1] for l in cpuinfo if l.startswith('model name') ][0]
-        return hostname, cpuinfo, cmdline, csv
+        return hostname, cpuinfo, cmdline, tuned, csv
 
 
 def main(router, hosts, exe_path, bcmd, out_dir):
@@ -56,13 +56,13 @@ def main(router, hosts, exe_path, bcmd, out_dir):
         fs.append(c.call_async(bench, exe, bcmd))
 
     with open(f'{out_dir}/hosts.csv', 'w') as g:
-        g.write('hostname,cpuinfo,cmdline\n')
+        g.write('hostname,cpuinfo,cmdline,tuned\n')
         for i, res in enumerate(mitogen.select.Select(fs)):
             log.info(f'Receiving from {res.router._stream_by_id[res.src_id].conn.options.hostname} ...')
             r = res.unpickle()
-            g.write(f'{r[0]},{r[1]},"{r[2]}"\n')
+            g.write(f'{r[0]},{r[1]},"{r[2]}",{r[3]}\n')
             with open(f'{out_dir}/bench-{r[0]}.csv', 'w') as f:
-                f.write(r[3])
+                f.write(r[4])
 
 def parse_args():
     p = argparse.ArgumentParser()
