@@ -1,4 +1,5 @@
-This repository contains OSjitter, Pingpong and ptp-clock-offset.
+This repository contains OSjitter, Pingpong and other
+latency/performance related utilities.
 
 OSjitter is a tool for measuring how much
 the operating system interrupts programs. Such interruptions
@@ -21,6 +22,10 @@ The ptp-clock-offset utility is a small program for checking
 the availability of different PTP offset ioctls and how they
 perform. Rule of thumb: using any PTP offset ioctl is better than
 having to use `clock_gettime()` and smaller delays are better.
+
+There is also a microbenchmark (`bench_syscalls.cc`) that measures
+some (seemingly) low-overhead syscalls in order to measure the
+userspace to kernelspace mode-switch costs.
 
 
 2019, Georg Sauthoff <mail@gms.tf>, GPLv3+
@@ -149,7 +154,19 @@ stackoverflow answer][2]).
 
 ## How to build
 
+For most utilities:
+
     $ make
+
+The syscall benchmark:
+
+    $ git submodule update --init
+    $ mkdir build
+    $ cd build
+    $ CXXFLAGS='-Wall -O3 -g' cmake .. -DCMAKE_BUILD_TYPE=Release -DBENCHMARK_ENABLE_GTEST_TESTS=0 -GNinja
+    $ ninja
+
+(or a similar cmake invocation)
 
 ## Related Work
 
@@ -187,6 +204,17 @@ measuring SMIs is to query CPU counters the SMI changes
 [Cyclictest][cyc] measures OS latency by [setting
 timers][cyc2] and comparing the actual sleep time with the
 configured one.
+
+Erik Rigtorp has published
+[hiccups](https://github.com/rigtorp/hiccups) to measure 'system
+induced jitter',
+[ipc-bench](https://github.com/rigtorp/ipc-bench) as a ping-pong
+latency benchmark and [c2clat](https://github.com/rigtorp/c2clat)
+to measure inter-core latency. The hiccups repository references
+[osnoise](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/Documentation/trace/osnoise-tracer.rst),
+an OS jitter detector built into the Linux kernel which appeared
+in Linux 5.14 or so that complements the above mentioned hardware
+latency detector.
 
 ## Pingpong Results
 
