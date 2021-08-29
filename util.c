@@ -225,6 +225,7 @@ static int get_tsc_khz_dmesg(uint32_t *tsc_khz)
 // some ways to get the tick rate of the TSC
 int get_tsc_khz(uint32_t *tsc_khz)
 {
+    *tsc_khz = 0;
     int r = get_tsc_khz_proc(tsc_khz);
     if (r < 0)
         return r;
