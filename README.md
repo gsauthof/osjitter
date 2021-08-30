@@ -25,7 +25,8 @@ having to use `clock_gettime()` and smaller delays are better.
 
 There is also a microbenchmark (`bench_syscalls.cc`) that measures
 some (seemingly) low-overhead syscalls in order to measure the
-userspace to kernelspace mode-switch costs.
+userspace to kernelspace mode-switch costs. See also a [related
+blog post](https://gms.tf/on-the-costs-of-syscalls.html) for some results.
 
 
 2019, Georg Sauthoff <mail@gms.tf>, GPLv3+
