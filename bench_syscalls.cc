@@ -128,7 +128,8 @@ BENCHMARK(bench_nanosleep1_slack1);
 static void bench_pthread_cond_signal(benchmark::State& state) {
     pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
     for (auto _ : state) {
-        pthread_cond_signal(&cv);
+        int r = pthread_cond_signal(&cv);
+        assert(!r);
     }
 }
 

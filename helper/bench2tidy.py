@@ -27,7 +27,7 @@ def dump_csv(filename, host, o):
 
 def main(filenames, ofilename):
     with open(ofilename, 'w') as f:
-        f.write('host,name,iterations,real_time,cpu_time\n')
+        f.write('host,name,iterations,real_ns,cpu_ns\n')
         for fn in filenames:
             host = fn[fn.rindex('-')+1:-4]
             dump_csv(fn, host, f)
