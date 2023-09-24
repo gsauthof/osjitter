@@ -140,11 +140,9 @@ static int read_ptp_offset_precise(int fd)
         return 1;
     }
     uint64_t sc_delay = tsc2ns(e - b);
-    for (unsigned i = 0; i < 5; ++i) {
-        int64_t off  = pct2ns_tai(&psop.sys_realtime) - pct2ns(&psop.device);
-        printf("PTP_SYS_OFFSET_PRECISE no %u: %" PRId64 " ns, delay: 0 ns, syscall: %" PRIu64 " ns\n",
-                i+1, off, sc_delay);
-    }
+    int64_t off  = pct2ns_tai(&psop.sys_realtime) - pct2ns(&psop.device);
+    printf("PTP_SYS_OFFSET_PRECISE: %" PRId64 " ns, delay: 0 ns, syscall: %" PRIu64 " ns\n",
+                off, sc_delay);
     return 0;
 }
 
@@ -173,11 +171,11 @@ int main(int argc, char **argv)
     printf("## Testing clock_gettime\n");
     read_clock_offset(fd);
 
-    printf("## Testing PTP_SYS_OFFSET ioct (%lu)\n", PTP_SYS_OFFSET);
+    printf("## Testing PTP_SYS_OFFSET ioctl (%#lx)\n", PTP_SYS_OFFSET);
     read_ptp_offset(fd);
-    printf("## Testing PTP_SYS_OFFSET_EXTENDED ioctl (%lu)\n", PTP_SYS_OFFSET_EXTENDED);
+    printf("## Testing PTP_SYS_OFFSET_EXTENDED ioctl (%#lx)\n", PTP_SYS_OFFSET_EXTENDED);
     read_ptp_offset_extended(fd);
-    printf("## Testing PTP_SYS_OFFSET_PRECISE ioctl (%lu)\n", PTP_SYS_OFFSET_PRECISE);
+    printf("## Testing PTP_SYS_OFFSET_PRECISE ioctl (%#lx)\n", PTP_SYS_OFFSET_PRECISE);
     read_ptp_offset_precise(fd);
 
     return 0;
