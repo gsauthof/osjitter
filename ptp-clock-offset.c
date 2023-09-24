@@ -20,6 +20,16 @@
 #include <linux/ptp_clock.h>
 #include "ptp-clock-future.h"
 
+
+// for Solarflare private clock offset ioctl
+#include <linux/sockios.h> // SIOCDEVPRIVATE
+#include <net/if.h>        // ifreq
+#include <sys/types.h>     // socket()
+#include <sys/socket.h>    // socket()
+#include <string.h>        // strcpy()
+#include <unistd.h>        // close()
+
+
 #include "tsc.h"
 #include "util.h"
 
@@ -146,6 +156,58 @@ static int read_ptp_offset_precise(int fd)
     return 0;
 }
 
+
+struct sfc_ts {
+    int64_t sec;
+    int32_t nsec;
+};
+
+static int64_t sfcts2ns(const struct sfc_ts *ts)
+{
+    return (int64_t)(ts->sec * 1000000000lu) + (int64_t)ts->nsec;
+}
+
+const unsigned long SIOCEFX = SIOCDEVPRIVATE + 3;
+const uint16_t EFX_TS_SYNC = 0xef16;
+
+static int read_sfc_offset(const char *name)
+{
+    struct ts_req {
+        uint16_t command;
+        uint16_t pad;
+        struct sfc_ts ts;
+    } __attribute__ ((packed));
+    struct ts_req d = {
+        .command = EFX_TS_SYNC
+    };
+    struct ifreq ifr = {
+        .ifr_data = (void*) &d
+    };
+    strcpy(ifr.ifr_name, name);
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+
+    uint64_t b = fenced_rdtsc();
+    int r = ioctl(fd, SIOCEFX, &ifr);
+    uint64_t e = fenced_rdtscp();
+    if (r) {
+        perror("SFC SIOCEFX");
+        close(fd);
+        return 1;
+    }
+    uint64_t sc_delay = tsc2ns(e - b);
+    struct sfc_ts t = d.ts;
+    int64_t off = sfcts2ns(&t);
+
+    printf("SFC_OFFSET: %" PRId64 " ns, delay: ? ns, syscall: %" PRIu64 " ns\n",
+            off, sc_delay);
+
+
+    close(fd);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -160,7 +222,15 @@ int main(int argc, char **argv)
     clocks_calc_mult_shift(&tsc_mult, &tsc_shift,
             tsc_khz, 1000000l, 0);
 
+
     const char *dev = argv[1];
+
+
+    if (*dev != '/') {
+        printf("## Testing Solarflare SIOCEFX / EFX_TS_SYNC ioctl (%#lx / %#" PRIx16 ")\n", SIOCEFX, EFX_TS_SYNC);
+        read_sfc_offset(dev);
+        return 0;
+    }
 
     int fd = open(dev, O_RDWR);
     if (fd == -1) {
