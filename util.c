@@ -203,7 +203,7 @@ static int get_tsc_khz_cmd(const char *cmd, uint32_t *tsc_khz)
 static int get_tsc_khz_journal(uint32_t *tsc_khz)
 {
 
-    const char cmd[] = "journalctl --boot 2>/dev/null | grep 'kernel: tsc:' -i "
+    const char cmd[] = "journalctl -k 2>/dev/null | grep 'kernel: tsc:' -i "
             "| cut -d' ' -f5- | grep -o ' [0-9]\\+\\.[0-9]\\{3\\} MHz' "
             "| tail -n 1 ";
     return get_tsc_khz_cmd(cmd, tsc_khz);
