@@ -41,4 +41,6 @@ void clocks_calc_mult_shift(
         uint32_t *mult, uint32_t *shift, uint32_t from, uint32_t to,
         uint32_t maxsec);
 
+int get_tsc_perf(uint32_t *mult, uint32_t *shift);
+
 #endif

@@ -18,6 +18,11 @@
 #include <errno.h>
 #include <unistd.h>
 
+// perf_event_open() etc.
+#include <asm/unistd.h>
+#include <linux/perf_event.h>
+#include <sys/mman.h>
+
 void perror_e(int r, const char *msg)
 {
     char buf[1024];
@@ -245,3 +250,56 @@ int get_tsc_khz(uint32_t *tsc_khz)
     }
     return 0;
 }
+
+
+static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
+                   int cpu, int group_fd, unsigned long flags)
+{
+    return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
+}
+
+// see also https://stackoverflow.com/a/57835630/427158
+//
+// Unfortunately, the kernel decreases precision of mult and shift
+// due to backwards compatibility:
+//
+// https://elixir.bootlin.com/linux/v5.19.17/source/arch/x86/kernel/tsc.c#L148
+//
+// Thus, for short durations, calling clocks_calc_mult_shift() with the true
+// TSC rate in user space is more precise.
+int get_tsc_perf(uint32_t *mult, uint32_t *shift)
+{
+    struct perf_event_attr pe = {
+        .type           = PERF_TYPE_HARDWARE,
+        .size           = sizeof(struct perf_event_attr),
+        .config         = PERF_COUNT_HW_INSTRUCTIONS,
+        .disabled       = 1,
+        .exclude_kernel = 1,
+        .exclude_hv     = 1
+    };
+    int fd = perf_event_open(&pe, 0, -1, -1, 0);
+    if (fd == -1) {
+        perror("perf_event_open failed");
+        return -1;
+    }
+    void *addr = mmap(NULL, 4*1024, PROT_READ, MAP_SHARED, fd, 0);
+    if (!addr) {
+        perror("mmap perf page failed");
+        return -1;
+    }
+    struct perf_event_mmap_page *pc = addr;
+    if (pc->cap_user_time != 1) {
+        fprintf(stderr, "Perf system doesn't support user time\n");
+        return -1;
+    }
+    *mult  = pc->time_mult;
+    *shift = pc->time_shift;
+    int r = munmap(addr, 4*1024);
+    if (r == -1) {
+        perror("munmap perf page");
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+

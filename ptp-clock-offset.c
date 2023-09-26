@@ -43,7 +43,9 @@
 // as of 2020
 static int64_t tai_off_ns = 37000000000l;
 
+#ifndef PCO_READ_PERF
 static uint32_t tsc_khz;
+#endif
 static uint32_t tsc_mult;
 static uint32_t tsc_shift;
 
@@ -279,12 +281,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
+#ifndef PCO_READ_PERF
     int r = get_tsc_khz(&tsc_khz);
     if (r) {
         return 1;
     }
     clocks_calc_mult_shift(&tsc_mult, &tsc_shift,
             tsc_khz, 1000000l, 0);
+#else
+    int r = get_tsc_perf(&tsc_mult, &tsc_shift);
+    if (r == -1)
+        return 1;
+#endif
 
 
     bool is_sfc = false;
