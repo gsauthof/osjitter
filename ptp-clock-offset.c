@@ -5,10 +5,12 @@
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <stdbool.h>
 
 
 #include <fcntl.h>
@@ -30,6 +32,10 @@
 #include <unistd.h>        // close()
 
 
+#include <linux/ethtool.h> // ethtool_ts_info
+#include <linux/sockios.h> // SIOCETHTOOL
+
+
 #include "tsc.h"
 #include "util.h"
 
@@ -40,6 +46,10 @@ static int64_t tai_off_ns = 37000000000l;
 static uint32_t tsc_khz;
 static uint32_t tsc_mult;
 static uint32_t tsc_shift;
+
+
+
+
 
 static int64_t pct2ns(const struct ptp_clock_time *ptc)
 {
@@ -157,6 +167,63 @@ static int read_ptp_offset_precise(int fd)
 }
 
 
+static int mk_if_fd()
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == -1)
+        perror("creating if fd");
+    return fd;
+}
+
+
+static int get_ptp_dev(int fd, const char *if_name, const char **dev, bool *is_sfc)
+{
+    struct ethtool_ts_info tsi = {
+        .cmd = ETHTOOL_GET_TS_INFO,
+        .phc_index = 23
+    };
+
+    struct ifreq ifr = {
+        .ifr_data = (void*) &tsi
+    };
+    strcpy(ifr.ifr_name, if_name);
+
+    int r = ioctl(fd, SIOCETHTOOL, &ifr);
+    if (r == -1) {
+        perror("ioctl SIOCETHTOOL ETHTOOL_GET_TS_INFO");
+        return -1;
+    }
+
+    if (tsi.phc_index == -1) {
+        fprintf(stderr, "%s has no PTP hardware clock device\n", if_name);
+        return -1;
+    }
+    char *s = 0;
+    r = asprintf(&s, "/dev/ptp%d", tsi.phc_index);
+    if (r == -1) {
+        perror("asprintf");
+        return -1;
+    }
+    *dev = s;
+
+    struct ethtool_drvinfo di = {
+        .cmd = ETHTOOL_GDRVINFO
+    };
+    ifr.ifr_data = (void*) &di;
+
+    r = ioctl(fd, SIOCETHTOOL, &ifr);
+    if (r == -1) {
+        perror("ioctl SIOCETHTOOL ETHTOOL_GDRVINFO");
+        return 1;
+    }
+
+    if (!strcmp(di.driver, "sfc"))
+        *is_sfc = true;
+
+    return 0;
+}
+
+
 struct sfc_ts {
     int64_t sec;
     int32_t nsec;
@@ -170,7 +237,7 @@ static int64_t sfcts2ns(const struct sfc_ts *ts)
 const unsigned long SIOCEFX = SIOCDEVPRIVATE + 3;
 const uint16_t EFX_TS_SYNC = 0xef16;
 
-static int read_sfc_offset(const char *name)
+static int read_sfc_offset(int fd, const char *name)
 {
     struct ts_req {
         uint16_t command;
@@ -185,7 +252,6 @@ static int read_sfc_offset(const char *name)
     };
     strcpy(ifr.ifr_name, name);
 
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
 
 
     uint64_t b = fenced_rdtsc();
@@ -193,7 +259,6 @@ static int read_sfc_offset(const char *name)
     uint64_t e = fenced_rdtscp();
     if (r) {
         perror("SFC SIOCEFX");
-        close(fd);
         return 1;
     }
     uint64_t sc_delay = tsc2ns(e - b);
@@ -204,14 +269,13 @@ static int read_sfc_offset(const char *name)
             off, sc_delay);
 
 
-    close(fd);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "call: %s /dev/ptpX\n", argv[0]);
+        fprintf(stderr, "call: %s /dev/ptpX|ifname\n", argv[0]);
         return 1;
     }
 
@@ -223,13 +287,20 @@ int main(int argc, char **argv)
             tsc_khz, 1000000l, 0);
 
 
+    bool is_sfc = false;
+    const char *if_name = 0;
+    int if_fd = -1;
     const char *dev = argv[1];
 
 
     if (*dev != '/') {
-        printf("## Testing Solarflare SIOCEFX / EFX_TS_SYNC ioctl (%#lx / %#" PRIx16 ")\n", SIOCEFX, EFX_TS_SYNC);
-        read_sfc_offset(dev);
-        return 0;
+        if_name = dev;
+        if_fd = mk_if_fd();
+        if (if_fd == -1)
+            return 1;
+        int r = get_ptp_dev(if_fd, if_name, &dev, &is_sfc);
+        if (r == -1)
+            return 1;
     }
 
     int fd = open(dev, O_RDWR);
@@ -247,6 +318,15 @@ int main(int argc, char **argv)
     read_ptp_offset_extended(fd);
     printf("## Testing PTP_SYS_OFFSET_PRECISE ioctl (%#lx)\n", PTP_SYS_OFFSET_PRECISE);
     read_ptp_offset_precise(fd);
+
+    if (is_sfc) {
+        printf("## Testing Solarflare SIOCEFX / EFX_TS_SYNC ioctl (%#lx / %#" PRIx16 ")\n", SIOCEFX, EFX_TS_SYNC);
+        read_sfc_offset(if_fd, if_name);
+    }
+
+    if (if_fd != -1)
+        close(if_fd);
+    close(fd);
 
     return 0;
 }
