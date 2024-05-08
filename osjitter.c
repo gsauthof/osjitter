@@ -506,7 +506,7 @@ static int pp_results(const Worker *ws, FILE *f)
         const Worker *w = ws+cpu;
         uint64_t intr_ns = mul_u64_u32_shr(w->tsc_total_int,
                 args->mult, args->shift);
-        ys = realloc(ys, w->samples * sizeof ys[0]);
+        ys = realloc(ys, (w->samples ? w->samples : 1) * sizeof ys[0]);
         if (!ys) {
             fprintf(stderr, "realloc in pp_results failed\n");
             return -1;
