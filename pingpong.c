@@ -123,6 +123,7 @@ enum Method {
     METHOD_SPIN,
     METHOD_SPIN_PAUSE,
     METHOD_SPIN_PAUSE_MORE,
+    METHOD_PAUSE_TSC,
     METHOD_COND_VAR,
     METHOD_NULL,
     METHOD_PIPE,
@@ -159,6 +160,7 @@ static void help(FILE *f, const char *argv0)
             "  --spin            loop on an atomic variable (default)\n"
             "  --spin-pause      pause after each atomic load\n"
             "  -p                #pauses after each atomic load\n"
+            "  --pause-tsc       like --spin-pause but limit spinning to 1 second\n"
             "  --cv              use a condition variable for ping pong\n"
             "  --pipe            use a UNIX pipe for ping pong\n"
             "  --futex           use a Linux futex for ping pong\n"
@@ -222,6 +224,8 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_SPIN;
         } else if (!strcmp(argv[i], "--spin-pause")) {
             args->method = METHOD_SPIN_PAUSE;
+        } else if (!strcmp(argv[i], "--pause-tsc")) {
+            args->method = METHOD_PAUSE_TSC;
         } else if (!strcmp(argv[i], "--cv")) {
             args->method = METHOD_COND_VAR;
         } else if (!strcmp(argv[i], "--null")) {
@@ -441,6 +445,59 @@ static void *spin_pause_more_main(void *p)
                 }
                 for (unsigned j = 0; j < w.p; ++j)
                     _mm_pause();
+            }
+            uint64_t now   = fenced_rdtscp();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+
+
+static void *pause_tsc_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                atomic_store_explicit(&g_cell[!w.init].tsc, t,
+                        memory_order_release);
+                break;
+            }
+        } else { // receiver
+            uint64_t new_tsc = 0;
+            uint64_t end = __rdtsc();
+            end += 1000000000ul * 4; // wait up to ~ 1 s
+            while (__rdtsc() < end) {
+                new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                        memory_order_consume);
+                if (new_tsc > tsc) {
+                    break;
+                }
+                _mm_pause();
             }
             uint64_t now   = fenced_rdtscp();
             uint64_t delta = now - new_tsc;
@@ -835,6 +892,10 @@ static int spin_pingpong(const Args *args)
             case METHOD_SPIN_PAUSE_MORE:
                 r = pthread_create(&ws[i].worker_id, &attr,
                         spin_pause_more_main, ws+i);
+                break;
+            case METHOD_PAUSE_TSC:
+                r = pthread_create(&ws[i].worker_id, &attr, pause_tsc_main,
+                        ws+i);
                 break;
             case METHOD_COND_VAR:
                 r = pthread_create(&ws[i].worker_id, &attr, cv_main, ws+i);
