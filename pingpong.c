@@ -40,7 +40,11 @@ struct Cell {
 };
 typedef struct Cell Cell;
 
+static_assert(sizeof(Cell) == 64, "Cell is not padded");
+
 static Cell g_cell[2];
+
+static_assert(alignof(g_cell) == 64, "cell array is not aligned");
 
 // without C11 support:
 // struct Item { ... } __attribute__ ((aligned (64)));
