@@ -127,6 +127,9 @@ enum Method {
 #if __WAITPKG__
     METHOD_UMWAIT,
 #endif
+#if __RTM__
+    METHOD_TSX,
+#endif
     METHOD_COND_VAR,
     METHOD_NULL,
     METHOD_PIPE,
@@ -164,7 +167,9 @@ static void help(FILE *f, const char *argv0)
             "  --spin-pause      pause after each atomic load\n"
             "  --pause-tsc       like --spin-pause but limit spinning to 1 second\n"
             "  --umwait          spin less with UMONITOR/UMWAIT\n"
+            "  --tsx             spin less with XBEGIN-style transactions\n"
             "  -p COUNT          #pauses after each atomic load,\n"
+            "                    or pass 2 to enable c0.2 with --umwait or --tsx\n"
             "  --cv              use a condition variable for ping pong\n"
             "  --pipe            use a UNIX pipe for ping pong\n"
             "  --futex           use a Linux futex for ping pong\n"
@@ -235,6 +240,13 @@ static int parse_args(Args *args, int argc, char **argv)
             args->method = METHOD_UMWAIT;
 #else
             fprintf(stderr, "--umwait requires recompiling with `-march=native` or similar in CFLAGS1\n");
+            exit(1);
+#endif
+        } else if (!strcmp(argv[i], "--tsx")) {
+#if __RTM__
+            args->method = METHOD_TSX;
+#else
+            fprintf(stderr, "--tsx requires recompiling with `-march=native -mrtm` or similar in CFLAGS1\n");
             exit(1);
 #endif
         } else if (!strcmp(argv[i], "--cv")) {
@@ -564,6 +576,79 @@ static void *umwait_main(void *p)
                 if (new_tsc > tsc)
                     break;
                 _umwait(c0, -1);
+                new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                        memory_order_consume);
+                if (new_tsc > tsc)
+                    break;
+            }
+            uint64_t now   = fenced_rdtscp();
+            uint64_t delta = now - new_tsc;
+            ds[j++] = delta;
+            tsc = new_tsc;
+        }
+    }
+    return spin_main_finalize(x, ds, j);
+}
+#endif
+
+#if __RTM__
+static void *tsx_main(void *p)
+{
+    Worker *x = (Worker*) p;
+    Worker w = *x;
+    unsigned char c0 = 1; // == c01
+    if (w.p == 2)
+        c0 = 0; // == c02
+
+    uint64_t tsc = 1;
+    unsigned j = 0;
+    uint32_t *ds = calloc(w.n/2, sizeof ds[0]);
+    if (!ds) {
+        fprintf(stderr, "Failed to allocate delta array in thread\n");
+        return 0;
+    }
+
+    while(!atomic_load_explicit(&start_work, memory_order_consume)) {
+        _mm_pause();
+    }
+
+    for (unsigned i = 0; i < w.n; ++i) {
+        if (i % 2 == w.init) { // sender
+            unsigned k = i < 2 ? w.k : w.k * 2;
+            for (unsigned j = 0; j < k; ++j)
+                _mm_pause();
+            uint64_t t;
+            for (;;) {
+                t = fenced_rdtsc();
+                if (t <= tsc)
+                    continue;
+                atomic_store_explicit(&g_cell[!w.init].tsc, t,
+                        memory_order_release);
+                break;
+            }
+        } else { // receiver
+            uint64_t new_tsc;
+            for (;;) {
+                for (;;) {
+                    unsigned tx = _xbegin();
+                    if (tx != _XBEGIN_STARTED) {
+                        // tx == 6 == (_XABORT_RETRY | _XABORT_CONFLICT)
+                        //    => shared tsc was written after our explicit load
+                        break;
+                    }
+                    new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
+                            memory_order_consume);
+                    // shared tsc is now part of the transaction's read-set
+                    if (new_tsc > tsc) {
+                        // unlikely, i.e. if we don't need to wait, at all
+                        _xend();
+                        break;
+                    }
+                    // if other thread writes shared tsc while tpause executes
+                    // our transaction is rolled back
+                    _tpause(c0, -1);
+                    _xend();
+                }
                 new_tsc = atomic_load_explicit(&g_cell[w.init].tsc,
                         memory_order_consume);
                 if (new_tsc > tsc)
@@ -971,6 +1056,12 @@ static int spin_pingpong(const Args *args)
 #if __WAITPKG__
             case METHOD_UMWAIT:
                 r = pthread_create(&ws[i].worker_id, &attr, umwait_main,
+                        ws+i);
+                break;
+#endif
+#if __RTM__
+            case METHOD_TSX:
+                r = pthread_create(&ws[i].worker_id, &attr, tsx_main,
                         ws+i);
                 break;
 #endif
